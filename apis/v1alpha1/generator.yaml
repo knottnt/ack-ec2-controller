@@ -780,6 +780,11 @@ resources:
         is_read_only: true
         print:
           name: ID
+      AddressFamily:
+        # AddressFamily is not supported in ModifyManagedPrefixList's input, so
+        # a change to it can never be reconciled. Reject it at admission rather
+        # than letting it sit as drift no update can clear.
+        is_immutable: true
       Name: {}
       State:
         is_read_only: true
@@ -794,8 +799,11 @@ resources:
       Entries:
         custom_field:
           list_of: AddPrefixListEntry
+        # Compared as a CIDR-keyed set in the delta_post_compare hook
+        # (customPostCompare), since AWS returns entries in its own order; the
+        # generated order-sensitive comparison is skipped.
         compare:
-          is_ignored: false
+          is_ignored: true
       Tags:
         from:
           operation: CreateTags
@@ -813,6 +821,8 @@ resources:
         - delete-complete
         - delete-failed
     hooks:
+      delta_post_compare:
+        code: customPostCompare(delta, a, b)
       sdk_create_post_build_request:
         template_path: hooks/managed_prefix_list/sdk_create_post_build_request.go.tpl
       sdk_read_many_post_build_request:

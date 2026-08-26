@@ -49,6 +49,29 @@ func updateTagSpecificationsInCreateRequest(r *resource,
 	}
 }
 
+// customPostCompare compares Spec.Entries as a set keyed by CIDR.
+//
+// GetManagedPrefixListEntries returns entries in an order AWS chooses, which
+// need not match the order declared in the Spec. An order-sensitive comparison
+// therefore reports a difference that no update can ever resolve: the entries
+// to add and remove are computed from CIDR-keyed maps, so both come back empty
+// and the next reconcile sees the same difference again.
+func customPostCompare(
+	delta *ackcompare.Delta,
+	a *resource,
+	b *resource,
+) {
+	if a == nil || b == nil || a.ko == nil || b.ko == nil {
+		return
+	}
+	if !ackcompare.MapStringStringEqual(
+		buildEntriesMap(a.ko.Spec.Entries),
+		buildEntriesMap(b.ko.Spec.Entries),
+	) {
+		delta.Add("Spec.Entries", a.ko.Spec.Entries, b.ko.Spec.Entries)
+	}
+}
+
 // customUpdateManagedPrefixList provides custom logic for updating ManagedPrefixList
 func (rm *resourceManager) customUpdateManagedPrefixList(
 	ctx context.Context,
@@ -75,8 +98,12 @@ func (rm *resourceManager) customUpdateManagedPrefixList(
 	input := &svcsdk.ModifyManagedPrefixListInput{}
 	input.PrefixListId = latest.ko.Status.ID
 
-	// Always set the Name field from desired state
-	input.PrefixListName = desired.ko.Spec.Name
+	// Only set the Name when it actually changed. Setting it unconditionally
+	// defeats the "are there changes?" guard below, so a reconcile with nothing
+	// to change still issues a request.
+	if delta.DifferentAt("Spec.Name") {
+		input.PrefixListName = desired.ko.Spec.Name
+	}
 
 	if delta.DifferentAt("Spec.MaxEntries") {
 		if desired.ko.Spec.MaxEntries != nil {
@@ -103,8 +130,11 @@ func (rm *resourceManager) customUpdateManagedPrefixList(
 		}
 	}
 
-	// Set current version for optimistic locking (required by AWS for any modification)
-	if latest.ko.Status.Version != nil {
+	// Set current version for optimistic locking. Only entry modifications
+	// create a new version, so AWS rejects CurrentVersion on a request that
+	// carries none.
+	if (len(input.AddEntries) > 0 || len(input.RemoveEntries) > 0) &&
+		latest.ko.Status.Version != nil {
 		input.CurrentVersion = latest.ko.Status.Version
 	}
 

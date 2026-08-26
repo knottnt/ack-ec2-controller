@@ -20,7 +20,6 @@ import (
 
 	ackcompare "github.com/aws-controllers-k8s/runtime/pkg/compare"
 	acktags "github.com/aws-controllers-k8s/runtime/pkg/tags"
-	"k8s.io/apimachinery/pkg/api/equality"
 )
 
 // Hack to avoid import errors during build...
@@ -49,13 +48,6 @@ func newResourceDelta(
 			delta.Add("Spec.AddressFamily", a.ko.Spec.AddressFamily, b.ko.Spec.AddressFamily)
 		}
 	}
-	if len(a.ko.Spec.Entries) != len(b.ko.Spec.Entries) {
-		delta.Add("Spec.Entries", a.ko.Spec.Entries, b.ko.Spec.Entries)
-	} else if len(a.ko.Spec.Entries) > 0 {
-		if !equality.Semantic.Equalities.DeepEqual(a.ko.Spec.Entries, b.ko.Spec.Entries) {
-			delta.Add("Spec.Entries", a.ko.Spec.Entries, b.ko.Spec.Entries)
-		}
-	}
 	if ackcompare.HasNilDifference(a.ko.Spec.MaxEntries, b.ko.Spec.MaxEntries) {
 		delta.Add("Spec.MaxEntries", a.ko.Spec.MaxEntries, b.ko.Spec.MaxEntries)
 	} else if a.ko.Spec.MaxEntries != nil && b.ko.Spec.MaxEntries != nil {
@@ -76,5 +68,6 @@ func newResourceDelta(
 		delta.Add("Spec.Tags", a.ko.Spec.Tags, b.ko.Spec.Tags)
 	}
 
+	customPostCompare(delta, a, b)
 	return delta
 }

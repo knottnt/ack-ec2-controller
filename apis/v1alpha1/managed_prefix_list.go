@@ -28,6 +28,7 @@ type ManagedPrefixListSpec struct {
 	// The IP address type.
 	//
 	// Valid Values: IPv4 | IPv6
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="Value is immutable once set"
 	// +kubebuilder:validation:Required
 	AddressFamily *string               `json:"addressFamily"`
 	Entries       []*AddPrefixListEntry `json:"entries,omitempty"`

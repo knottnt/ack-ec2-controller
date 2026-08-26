@@ -218,7 +218,13 @@ class TestManagedPrefixList:
         cr = k8s.get_resource(ref)
         assert cr['status']['state'] == 'create-complete', f"K8s state is {cr['status']['state']}, expected create-complete"
 
+        version_before_add = ec2_validator.get_managed_prefix_list(prefix_list_id)['Version']
+
         # ===== TEST 1: Add an entry (3 → 4) =====
+        # 10.0.2.0/24 sorts between the existing entries rather than after them,
+        # so AWS reads the list back in an order that differs from the declared
+        # one. That divergence is the whole point of this step: it must not be
+        # mistaken for a change. See test_entry_reorder_is_not_a_change.
         cr['spec']['entries'].append({
             'cidr': '10.0.2.0/24',
             'description': 'New network C'
@@ -246,6 +252,13 @@ class TestManagedPrefixList:
         aws_prefix_list = ec2_validator.get_managed_prefix_list(prefix_list_id)
         after_add_count = len(aws_prefix_list.get('Entries', []))
         assert after_add_count == 4, f"Expected 4 entries after add, got {after_add_count}"
+
+        # Exactly one modification. Adding or removing entries bumps the version,
+        # so a version that advanced by more than one means the controller issued
+        # extra modify calls -- the signature of a delta that never clears.
+        after_add_version = aws_prefix_list['Version']
+        assert after_add_version == version_before_add + 1, \
+            f"Expected version {version_before_add + 1} after one add, got {after_add_version}"
 
         # ===== TEST 2: Remove an entry (4 → 3) =====
         cr = k8s.get_resource(ref)
@@ -291,6 +304,49 @@ class TestManagedPrefixList:
         assert entry_to_remove not in k8s_cidrs, \
             f"Entry {entry_to_remove} should not be in K8s: {k8s_cidrs}"
 
+    def test_entry_reorder_is_not_a_change(self, prefix_list_ipv4, ec2_validator):
+        """Reordering entries without changing the set must not drive an update.
+
+        GetManagedPrefixListEntries returns entries in an order AWS chooses, so
+        the declared order and the observed order routinely disagree. Comparing
+        them as ordered lists produces a difference that no update can resolve:
+        the add and remove sets are keyed by CIDR and both come back empty, so
+        the controller re-requests the same no-op modification forever. AWS
+        rejects a request that carries a version but modifies no entries, which
+        leaves the resource stuck short of Synced.
+        """
+        (ref, _) = prefix_list_ipv4
+        prefix_list_id = k8s.get_resource(ref)['status']['id']
+
+        aws_prefix_list = ec2_validator.get_managed_prefix_list(prefix_list_id)
+        version_before = aws_prefix_list['Version']
+        aws_cidrs = [e['Cidr'] for e in aws_prefix_list.get('Entries', [])]
+        assert len(aws_cidrs) > 1, \
+            f"Need at least two entries to reorder, got {aws_cidrs}"
+
+        # Reverse the order AWS reports rather than asserting a specific
+        # divergence, so the test does not depend on how AWS chooses to sort.
+        cr = k8s.get_resource(ref)
+        by_cidr = {e['cidr']: e for e in cr['spec']['entries']}
+        cr['spec']['entries'] = [by_cidr[cidr] for cidr in reversed(aws_cidrs)]
+
+        k8s.patch_custom_resource(ref, cr)
+        time.sleep(UPDATE_WAIT_AFTER_SECONDS)
+
+        # The spec change bumps metadata.generation, so a reconcile is
+        # guaranteed to have run against the reordered list.
+        assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=10), \
+            "Resource did not stay synced after reordering entries"
+
+        # An unchanged version is the definitive signal that the reorder was not
+        # mistaken for a change: any entry modification would have bumped it.
+        aws_prefix_list = ec2_validator.get_managed_prefix_list(prefix_list_id)
+        assert aws_prefix_list['Version'] == version_before, \
+            f"Reorder modified the prefix list: version went " \
+            f"{version_before} -> {aws_prefix_list['Version']}"
+        assert sorted(e['Cidr'] for e in aws_prefix_list.get('Entries', [])) == sorted(aws_cidrs), \
+            "Reorder changed the entries in AWS"
+
     def test_update_tags(self, prefix_list_ipv4, ec2_validator):
         """Test adding, updating, and removing prefix list tags."""
         (ref, cr) = prefix_list_ipv4
@@ -310,6 +366,8 @@ class TestManagedPrefixList:
             cr['spec']['tags'] = []
         cr['spec']['tags'].append(new_tag)
 
+        version_before_tag = ec2_validator.get_managed_prefix_list(prefix_list_id)['Version']
+
         # Apply the update
         k8s.patch_custom_resource(ref, cr)
         time.sleep(UPDATE_WAIT_AFTER_SECONDS)
@@ -317,6 +375,11 @@ class TestManagedPrefixList:
         # Wait for the resource to be synced
         assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=5), \
             "Resource did not sync after adding tag"
+
+        # A tags-only change must not touch the entries. The version staying put
+        # proves the reconcile did not also issue an entry modification.
+        assert ec2_validator.get_managed_prefix_list(prefix_list_id)['Version'] == version_before_tag, \
+            "Adding a tag modified the prefix list entries"
 
         # Get the updated resource
         cr = k8s.get_resource(ref)
