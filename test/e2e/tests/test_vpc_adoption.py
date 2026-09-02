@@ -70,6 +70,7 @@ class TestVpcAdoption:
     def test_vpc_adopt_update(self, ec2_client, vpc_adoption):
         (ref, cr) = vpc_adoption
 
+        assert k8s.wait_on_condition(ref, "ACK.ResourceSynced", "True", wait_periods=10)
         assert cr is not None
         assert 'status' in cr
         assert 'vpcID' in cr['status']
